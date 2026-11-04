@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+
+# assignment brief - keep it out of the public repo
+junior-platform-engineer-technical-assignment.md
