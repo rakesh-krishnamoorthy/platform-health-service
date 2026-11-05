@@ -62,7 +62,7 @@ I used `ap-southeast-2` because it's the only region my account allows. To use a
 
 ## Updating the app
 
-Pushing to `main` publishes a new image, but the instance only pulls one on first boot, and `terraform apply` won't notice because the image name stays the same. For now the update is manual. In an SSM session:
+Pushing to `main` publishes a new image, but the instance only pulls one on first boot, and `terraform apply` won't notice because the image name stays the same. For now the update is manual. Connect with SSM (step 4 under [Check that it works](#check-that-it-works)), then run:
 
 ```bash
 sudo docker pull ghcr.io/rakesh-krishnamoorthy/platform-health-service:latest
@@ -78,40 +78,60 @@ terraform apply -replace=aws_instance.app
 
 ## Check that it works
 
-`terraform apply` prints the public IP and instance ID. You can see them again with `terraform output`.
+Replace `<your-profile>`, `<public-ip>` and `<instance-id>` with your own values. If you deployed to another region, change `ap-southeast-2` too.
+
+**1. Get the public IP and instance ID.** Run this from the `terraform/` directory:
+
+```bash
+terraform output
+```
+
+**2. Check the app responds.**
 
 ```bash
 curl http://<public-ip>/health          # {"status":"ok"}
 curl http://<public-ip>/                # hello message
-nc -zv -w 5 <public-ip> 22              # times out, SSH is closed
 ```
 
-Connect to the instance:
+**3. Check SSH is closed.** This should time out:
 
 ```bash
-aws ssm start-session --target <instance-id>
+nc -zv -w 5 <public-ip> 22
 ```
 
-To test the health check, freeze the app and give cron time to notice:
+**4. Connect to the instance with SSM.**
+
+```bash
+aws ssm start-session --target <instance-id> --profile <your-profile> --region ap-southeast-2
+```
+
+**5. Test the health check.** Run these on the instance. They freeze the app and give cron time to notice:
 
 ```bash
 sudo docker pause phs
 sleep 90
-sudo journalctl -t healthcheck     # health check failed - restarting container phs
-sudo docker ps                     # phs is running again
+sudo journalctl -t healthcheck --no-pager     # health check failed - restarting container phs
+sudo docker ps                                # phs is running again
+exit
 ```
 
-To test a restart, reboot the instance, wait a minute or two, then call `/health` again:
+**6. Test a restart.** Run this on your machine:
 
 ```bash
-aws ec2 reboot-instances --instance-ids <instance-id>
+aws ec2 reboot-instances --instance-ids <instance-id> --profile <your-profile> --region ap-southeast-2
+```
+
+Wait two minutes, then call the app again. It should come back by itself:
+
+```bash
+curl http://<public-ip>/health
 ```
 
 ## CI
 
 The workflow runs on pushes to `main` and on pull requests. It runs the unit tests, builds the image, starts it and checks `/health`. On `main` it then pushes the image to GHCR, tagged `latest` and with the short commit SHA. There are no AWS credentials in GitHub.
 
-Output from [an earlier run](https://github.com/rakesh-krishnamoorthy/platform-health-service/actions/runs/41904835171):
+Example output from [a CI run](https://github.com/rakesh-krishnamoorthy/platform-health-service/actions/runs/42058698213):
 
 ```
 test_health (test_app.AppTests.test_health) ... ok
@@ -158,12 +178,13 @@ This is the order I'd check things in:
 
 To recover quickly, try `sudo docker restart phs`, then a reboot, and if that fails, `terraform apply -replace=aws_instance.app`.
 
-## Limitations
+## Assumptions and trade-offs
 
-- New images are updated by hand because GitHub OIDC isn't set up, so CI has no access to AWS. The next step would be a deploy job using OIDC and `aws ssm send-command`.
-- The instance uses the `latest` tag to keep things simple. CI also tags each image with its commit SHA, so `var.image` can be pinned to an exact version.
-- It's a single instance over plain HTTP. For production I'd put an Auto Scaling group behind a load balancer with a TLS certificate.
-- The health check runs on the instance and only writes to the system journal. It can't report the whole instance going down, and it won't alert anyone. CloudWatch alarms or an external check would cover that.
-- CI doesn't check the Terraform code. I ran `terraform fmt` and `terraform validate` by hand.
-- Terraform state is local, which is fine for one person.
-- `t3.micro` is free-tier eligible on my account, but AWS bills public IPv4 addresses separately, so run `terraform destroy` when you're done.
+I kept this small on purpose, to suit one service on the free tier.
+
+- **Deployment:** CI publishes the image and updating the instance is a manual step, so no AWS credentials are stored in GitHub.
+- **Image tag:** the instance uses `latest` for a simple setup. Each image also has a commit SHA tag, so `var.image` can be pinned to a version.
+- **Hosting:** a single instance over HTTP keeps it in the free tier. Production would add a load balancer and TLS.
+- **Health check:** it runs on the instance and logs to the system journal. It covers app failures, and an external check would cover the instance itself.
+- **Terraform:** state is local, and `terraform fmt` and `terraform validate` are run by hand.
+- **Cost:** `t3.micro` is free-tier eligible on my account, but AWS bills public IPv4 addresses separately, so run `terraform destroy` when you're done.
